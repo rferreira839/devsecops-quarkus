@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quarkus-demo
+  labels:
+    app: quarkus-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: quarkus-demo
+  template:
+    metadata:
+      labels:
+        app: quarkus-demo
+    spec:
+      containers:
+        - name: quarkus
+          image: localhost:5111/quarkus-demo:0.1.0
+          ports:
+            - containerPort: 8080
+          env:
+            - name: QUARKUS_HTTP_PORT
+              value: "8080"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

@@ -1,0 +1,9 @@
+﻿namespace: des
+
+resources:
+  - ../../base
+
+images:
+  - name: localhost:5111/quarkus-demo
+    newName: k3d-reglocal:5112/quarkus-demo
+    newTag: 0.1.0

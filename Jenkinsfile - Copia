@@ -1,0 +1,190 @@
+﻿// Jenkinsfile — pipeline DevSecOps completo para o seu projeto Quarkus + k3d
+
+pipeline {
+  // agent 'any' porque estamos rodando no próprio container Jenkins (Linux)
+  agent any
+
+  // =========================
+  // Variáveis de ambiente
+  // =========================
+  environment {
+    // Onde o Jenkins fará push/pull (do ponto de vista do HOST)
+    // Você já publica para localhost:5112 (ex.: docker push localhost:5112/quarkus-demo:0.1.0)
+    REGISTRY_HOST   = 'localhost:5112'
+
+    // Nome e tag da imagem da aplicação
+    IMAGE_NAME      = 'quarkus-demo'
+    IMAGE_TAG       = '0.1.0'         // Para o hackathon mantemos fixo. (Veja “Modo com versão dinâmica” no final.)
+
+    // Referência completa da imagem do ponto de vista do HOST (para build/push/scan)
+    IMAGE_LOCAL     = "${env.REGISTRY_HOST}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+
+    // Referência da imagem do ponto de vista do CLUSTER k3d (os nós enxergam o hostname k3d-reglocal)
+    IMAGE_CLUSTER   = "k3d-reglocal:5112/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+
+    // Gates de segurança (ajuste conforme o desafio permitir):
+    TRIVY_SEVERITY  = 'HIGH,CRITICAL' // falha o stage se houver HIGH/CRITICAL
+    SEMGREP_CONFIG  = 'p/ci'          // regras públicas “semgrep-ci”
+  }
+
+  // Qualidade de vida no console do Jenkins
+  options {
+    timestamps()               // imprime timestamps nas linhas do console
+    ansiColor('xterm')         // cores no console
+    skipDefaultCheckout false  // mantém o checkout padrão do SCM
+  }
+
+  stages {
+
+    // 1) Puxa o código do SCM (se usar Pipeline from SCM). Se colar o pipeline na UI, comente este stage.
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    // 2) Compila + testa dentro de um container Maven (sem poluir o Jenkins)
+    stage('Build & Unit Tests (Maven)') {
+      steps {
+        sh '''
+          set -e
+          cd app
+          docker run --rm -v "$PWD":/app -w /app maven:3.9-eclipse-temurin-17 \
+            mvn -B -DskipTests=false clean package
+        '''
+      }
+      post {
+        // Publica relatórios JUnit (não falha se estiverem vazios)
+        always {
+          junit allowEmptyResults: true, testResults: 'app/**/surefire-reports/*.xml'
+        }
+      }
+    }
+
+    // 3) Build da imagem Docker (usa seu Dockerfile multi-stage) e tag para o registry do HOST
+    stage('Build Docker Image') {
+      steps {
+        sh '''
+          set -e
+          docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile .
+          docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_LOCAL}
+        '''
+      }
+    }
+
+    // 4) SAST com Semgrep (varre o código-fonte no workspace)
+    stage('SAST (Semgrep)') {
+      steps {
+        sh '''
+          set -e
+          docker run --rm -v "$PWD":/src returntocorp/semgrep:latest \
+            semgrep ci --config ${SEMGREP_CONFIG} --error
+        '''
+      }
+    }
+
+    // 5) Dependency-Check (CVEs em dependências) — publica relatório HTML
+    stage('Dependency Scan (OWASP Dependency-Check)') {
+      steps {
+        sh '''
+          set -e
+          mkdir -p reports depcache
+          docker run --rm \
+            -v "$PWD/app":/src \
+            -v "$PWD/depcache":/usr/share/dependency-check/data \
+            -v "$PWD/reports":/report \
+            owasp/dependency-check:latest \
+            --scan /src --format "HTML" --out /report --failOnCVSS 7
+        '''
+      }
+      post {
+        always {
+          // Requer o plugin "HTML Publisher"
+          publishHTML(target: [
+            allowMissing: true,
+            alwaysLinkToLastBuild: true,
+            keepAll: true,
+            reportDir: 'reports',
+            reportFiles: 'dependency-check-report.html',
+            reportName: 'Dependency-Check Report'
+          ])
+        }
+      }
+    }
+
+    // 6) Trivy (vulnerabilidades em camada de container) — gate por severidade
+    stage('Image Scan (Trivy)') {
+      steps {
+        sh '''
+          set -e
+          docker run --rm aquasec/trivy:latest image \
+            --exit-code 1 \
+            --severity ${TRIVY_SEVERITY} \
+            ${IMAGE_LOCAL}
+        '''
+      }
+    }
+
+    // 7) Push da imagem para o registry local do HOST
+    stage('Push Image to Local Registry') {
+      steps {
+        sh '''
+          set -e
+          docker push ${IMAGE_LOCAL}
+        '''
+      }
+    }
+
+    // 8) Deploy automático no ambiente DES (dev/test)
+    stage('Deploy to DES') {
+      steps {
+        sh '''
+          set -e
+          # Garante o namespace (idempotente)
+          kubectl get ns des >/dev/null 2>&1 || kubectl create ns des
+
+          # Aplica overlay DES (seu overlay já mapeia a imagem para k3d-reglocal:5112/quarkus-demo:0.1.0)
+          kubectl apply -k deploy/overlays/des
+
+          # Aguarda rollout
+          kubectl -n des rollout status deploy/quarkus-demo --timeout=180s
+
+          # Mostra pods/resultados
+          kubectl -n des get pods -o wide
+        '''
+      }
+    }
+
+    // 9) Gate manual antes de PRD (apenas aprovar/seguir)
+    stage('Approval to Deploy PRD') {
+      steps {
+        script {
+          // Aumente o timeout se quiser mais tempo para revisar
+          timeout(time: 10, unit: 'MINUTES') {
+            input message: 'Aprovar deploy em PRD?', ok: 'Aprovar'
+          }
+        }
+      }
+    }
+
+    // 10) Deploy em PRD (2 réplicas + host prd.localhost via patch no overlay)
+    stage('Deploy to PRD') {
+      steps {
+        sh '''
+          set -e
+          kubectl get ns prd >/dev/null 2>&1 || kubectl create ns prd
+          kubectl apply -k deploy/overlays/prd
+          kubectl -n prd rollout status deploy/quarkus-demo --timeout=180s
+          kubectl -n prd get pods -o wide
+        '''
+      }
+    }
+  }
+
+  // Artefatos/relatórios (mantém os HTMLs; útil para submissão no hackathon)
+  post {
+    always {
+      archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+    }
+  }
+}

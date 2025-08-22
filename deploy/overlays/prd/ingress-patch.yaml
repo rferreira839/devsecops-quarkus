@@ -1,0 +1,17 @@
+﻿apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: quarkus-demo
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: prd.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: quarkus-demo
+                port:
+                  number: 80
