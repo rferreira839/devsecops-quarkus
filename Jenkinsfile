@@ -15,13 +15,6 @@ pipeline {
     timestamps()
     skipDefaultCheckout()
   }
-  environment {
-    REGISTRY_HOST  = 'localhost:5112'
-    IMAGE_NAME     = 'quarkus-demo'
-    IMAGE_TAG      = '0.1.0'
-    TRIVY_SEVERITY = 'HIGH,CRITICAL'
-    SEMGREP_CONFIG = 'p/ci'
-  }
 
   stages {
     stage('Checkout') {
