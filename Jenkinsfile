@@ -1,10 +1,11 @@
 pipeline {
   agent any
 
+  /* ===== Variáveis globais (APENAS UMA SECTION) ===== */
   environment {
     REGISTRY_HOST   = 'localhost:5112'
     IMAGE_NAME      = 'quarkus-demo'
-    IMAGE_TAG       = '0.1.0' // simples pro hackathon
+    IMAGE_TAG       = '0.1.0'
     IMAGE_LOCAL     = "${env.REGISTRY_HOST}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
     IMAGE_CLUSTER   = "k3d-reglocal:5112/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
     TRIVY_SEVERITY  = 'HIGH,CRITICAL'
@@ -13,7 +14,7 @@ pipeline {
 
   options {
     timestamps()
-    skipDefaultCheckout()
+    skipDefaultCheckout false
   }
 
   stages {
@@ -23,13 +24,11 @@ pipeline {
 
     stage('Build & Unit Tests (Maven)') {
       steps {
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          Push-Location app
-          $root = (Get-Location).Path
-          docker run --rm -v "$root:/app" -w /app maven:3.9-eclipse-temurin-17 `
+        sh '''
+          set -e
+          cd app
+          docker run --rm -v "$PWD":/app -w /app maven:3.9-eclipse-temurin-17 \
             mvn -B -DskipTests=false clean package
-          Pop-Location
         '''
       }
       post {
@@ -41,39 +40,34 @@ pipeline {
 
     stage('Build Docker Image') {
       steps {
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          docker build -t "$env:IMAGE_NAME:$env:IMAGE_TAG" -f docker/Dockerfile .
-          docker tag "$env:IMAGE_NAME:$env:IMAGE_TAG" "$env:REGISTRY_HOST/$env:IMAGE_NAME:$env:IMAGE_TAG"
+        sh '''
+          set -e
+          docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f docker/Dockerfile .
+          docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_LOCAL}
         '''
       }
     }
 
     stage('SAST (Semgrep)') {
       steps {
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          $root = (Get-Location).Path
-          docker run --rm -v "$root:/src" returntocorp/semgrep:latest `
-            semgrep ci --config $env:SEMGREP_CONFIG --error
+        sh '''
+          set -e
+          docker run --rm -v "$PWD":/src returntocorp/semgrep:latest \
+            semgrep ci --config ${SEMGREP_CONFIG} --error
         '''
       }
     }
 
     stage('Dependency Scan (OWASP DC)') {
       steps {
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path reports | Out-Null
-          New-Item -ItemType Directory -Force -Path depcache | Out-Null
-          $app     = (Resolve-Path .\\app).Path
-          $cache   = (Resolve-Path .\\depcache).Path
-          $reports = (Resolve-Path .\\reports).Path
-          docker run --rm `
-            -v "$app:/src" `
-            -v "$cache:/usr/share/dependency-check/data" `
-            -v "$reports:/report" `
-            owasp/dependency-check:latest `
+        sh '''
+          set -e
+          mkdir -p reports depcache
+          docker run --rm \
+            -v "$PWD/app":/src \
+            -v "$PWD/depcache":/usr/share/dependency-check/data \
+            -v "$PWD/reports":/report \
+            owasp/dependency-check:latest \
             --scan /src --format "HTML" --out /report --failOnCVSS 7
         '''
       }
@@ -93,51 +87,48 @@ pipeline {
 
     stage('Image Scan (Trivy)') {
       steps {
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          $image = "$env:IMAGE_NAME:$env:IMAGE_TAG"
-          $work  = (Get-Location).Path
-          docker save $image -o image.tar
-          docker run --rm -v "$work:/work" aquasec/trivy:latest image `
-            --exit-code 1 --severity $env:TRIVY_SEVERITY --input /work/image.tar
+        sh '''
+          set -e
+          docker run --rm aquasec/trivy:latest image \
+            --exit-code 1 \
+            --severity ${TRIVY_SEVERITY} \
+            ${IMAGE_LOCAL}
         '''
       }
     }
 
     stage('Push Image to Local Registry') {
       steps {
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          $image = "$env:REGISTRY_HOST/$env:IMAGE_NAME:$env:IMAGE_TAG"
-          docker push $image
-        '''
+        sh 'docker push ${IMAGE_LOCAL}'
       }
     }
 
     stage('Deploy to DES') {
       steps {
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          kubectl create namespace des --dry-run=client -o yaml | kubectl apply -f -
+        sh '''
+          set -e
+          kubectl get ns des >/dev/null 2>&1 || kubectl create ns des
           kubectl apply -k deploy/overlays/des
-          kubectl -n des rollout status deploy/quarkus-demo --timeout=120s
+          kubectl -n des rollout status deploy/quarkus-demo --timeout=180s
         '''
       }
     }
 
     stage('Approval to Deploy PRD') {
       steps {
-        timeout(time: 10, unit: 'MINUTES') {
-          input message: 'Aprovar deploy em PRD?', ok: 'Aprovar'
+        script {
+          timeout(time: 10, unit: 'MINUTES') {
+            input message: 'Aprovar deploy em PRD?', ok: 'Aprovar'
+          }
         }
       }
     }
 
     stage('Deploy to PRD') {
       steps {
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          kubectl create namespace prd --dry-run=client -o yaml | kubectl apply -f -
+        sh '''
+          set -e
+          kubectl get ns prd >/dev/null 2>&1 || kubectl create ns prd
           kubectl apply -k deploy/overlays/prd
           kubectl -n prd rollout status deploy/quarkus-demo --timeout=180s
         '''
