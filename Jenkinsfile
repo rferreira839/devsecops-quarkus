@@ -1,7 +1,6 @@
 pipeline {
   agent any
 
-  /* ===== Variáveis globais (APENAS UMA SECTION) ===== */
   environment {
     REGISTRY_HOST   = 'localhost:5112'
     IMAGE_NAME      = 'quarkus-demo'
@@ -12,10 +11,7 @@ pipeline {
     SEMGREP_CONFIG  = 'p/ci'
   }
 
-  options {
-    timestamps()
-    skipDefaultCheckout false
-  }
+  options { timestamps(); skipDefaultCheckout false }
 
   stages {
     stage('Checkout') {
@@ -26,14 +22,23 @@ pipeline {
       steps {
         sh '''
           set -e
-          cd app
-          docker run --rm -v "$PWD":/app -w /app maven:3.9-eclipse-temurin-17 \
+          # Detecta onde está o pom.xml
+          if [ -f app/pom.xml ]; then SRC_DIR="app"; else SRC_DIR="."; fi
+          echo "Usando SRC_DIR=$SRC_DIR"
+
+          docker run --rm -v "$PWD/$SRC_DIR":/app -w /app maven:3.9-eclipse-temurin-17 \
             mvn -B -DskipTests=false clean package
+
+          # Persistimos para os próximos stages
+          echo "$SRC_DIR" > .srcdir
         '''
       }
       post {
         always {
-          junit allowEmptyResults: true, testResults: 'app/**/surefire-reports/*.xml'
+          script {
+            def srcdir = fileExists('.srcdir') ? readFile('.srcdir').trim() : '.'
+            junit allowEmptyResults: true, testResults: "${srcdir}/**/surefire-reports/*.xml"
+          }
         }
       }
     }
@@ -52,7 +57,11 @@ pipeline {
       steps {
         sh '''
           set -e
-          docker run --rm -v "$PWD":/src returntocorp/semgrep:latest \
+          SRC_DIR="."
+          if [ -f .srcdir ]; then SRC_DIR=$(cat .srcdir); fi
+          echo "Semgrep usando SRC_DIR=$SRC_DIR"
+
+          docker run --rm -v "$PWD/$SRC_DIR":/src returntocorp/semgrep:latest \
             semgrep ci --config ${SEMGREP_CONFIG} --error
         '''
       }
@@ -62,9 +71,13 @@ pipeline {
       steps {
         sh '''
           set -e
+          SRC_DIR="."
+          if [ -f .srcdir ]; then SRC_DIR=$(cat .srcdir); fi
+          echo "Dependency-Check usando SRC_DIR=$SRC_DIR"
+
           mkdir -p reports depcache
           docker run --rm \
-            -v "$PWD/app":/src \
+            -v "$PWD/$SRC_DIR":/src \
             -v "$PWD/depcache":/usr/share/dependency-check/data \
             -v "$PWD/reports":/report \
             owasp/dependency-check:latest \
@@ -98,9 +111,7 @@ pipeline {
     }
 
     stage('Push Image to Local Registry') {
-      steps {
-        sh 'docker push ${IMAGE_LOCAL}'
-      }
+      steps { sh 'docker push ${IMAGE_LOCAL}' }
     }
 
     stage('Deploy to DES') {
@@ -136,9 +147,5 @@ pipeline {
     }
   }
 
-  post {
-    always {
-      archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
-    }
-  }
+  post { always { archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true } }
 }
