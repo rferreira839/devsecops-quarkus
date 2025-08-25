@@ -11,25 +11,28 @@ pipeline {
     SEMGREP_CONFIG  = 'p/ci'
   }
 
-  options { timestamps(); skipDefaultCheckout false }
+  options {
+    timestamps()
+    skipDefaultCheckout false
+  }
 
   stages {
     stage('Checkout') {
-      steps { checkout scm }
+      steps {
+        checkout scm
+      }
     }
 
     stage('Build & Unit Tests (Maven)') {
       steps {
         sh '''
           set -e
-          # Detecta onde está o pom.xml
           if [ -f app/pom.xml ]; then SRC_DIR="app"; else SRC_DIR="."; fi
           echo "Usando SRC_DIR=$SRC_DIR"
 
-          docker run --rm -v "$PWD/$SRC_DIR":/app -w /app maven:3.9-eclipse-temurin-17 \
+          docker run --rm -v "$PWD":/repo -w "/repo/$SRC_DIR" maven:3.9-eclipse-temurin-17 \
             mvn -B -DskipTests=false clean package
 
-          # Persistimos para os próximos stages
           echo "$SRC_DIR" > .srcdir
         '''
       }
@@ -61,7 +64,7 @@ pipeline {
           if [ -f .srcdir ]; then SRC_DIR=$(cat .srcdir); fi
           echo "Semgrep usando SRC_DIR=$SRC_DIR"
 
-          docker run --rm -v "$PWD/$SRC_DIR":/src returntocorp/semgrep:latest \
+          docker run --rm -v "$PWD":/repo -w "/repo/$SRC_DIR" returntocorp/semgrep:latest \
             semgrep ci --config ${SEMGREP_CONFIG} --error
         '''
       }
@@ -77,11 +80,11 @@ pipeline {
 
           mkdir -p reports depcache
           docker run --rm \
-            -v "$PWD/$SRC_DIR":/src \
+            -v "$PWD":/repo \
             -v "$PWD/depcache":/usr/share/dependency-check/data \
             -v "$PWD/reports":/report \
             owasp/dependency-check:latest \
-            --scan /src --format "HTML" --out /report --failOnCVSS 7
+            --scan "/repo/$SRC_DIR" --format "HTML" --out /report --failOnCVSS 7
         '''
       }
       post {
@@ -111,7 +114,9 @@ pipeline {
     }
 
     stage('Push Image to Local Registry') {
-      steps { sh 'docker push ${IMAGE_LOCAL}' }
+      steps {
+        sh 'docker push ${IMAGE_LOCAL}'
+      }
     }
 
     stage('Deploy to DES') {
@@ -147,5 +152,9 @@ pipeline {
     }
   }
 
-  post { always { archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true } }
+  post {
+    always {
+      archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+    }
+  }
 }
